@@ -1,4 +1,5 @@
 from collections import namedtuple
+from typing import Dict
 
 import numpy as np
 import torch
@@ -6,6 +7,7 @@ import random
 import torch.nn as nn
 import os
 
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group
 from torch.utils.data import DistributedSampler
 import loguru
@@ -161,3 +163,26 @@ def set_seed(seed: int):
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+
+def wrap_model(model, ddp_state, device):
+    model = model.to(device)
+    if hasattr(torch, "compile"):
+        model = torch.compile(model)
+    if ddp_state.is_ddp:
+        model = DDP(
+            model,
+            device_ids=[ddp_state.local_rank],
+            output_device=ddp_state.local_rank,
+            find_unused_parameters=True,
+        )
+    return model
+
+def unwrap_state_dict(state_dict: Dict) -> Dict:
+    """Unwrap a state dict that was wrapped by DDP"""
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        if k.startswith("module."):
+            new_state_dict[k[7:]] = v
+        else:
+            new_state_dict[k] = v
+    return new_state_dict
