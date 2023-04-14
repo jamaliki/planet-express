@@ -1,3 +1,4 @@
+import math
 from collections import namedtuple
 from typing import Dict
 
@@ -109,6 +110,34 @@ def get_activation(activation):
         return nn.Identity()
     else:
         raise ValueError('Activation function not recognized')
+
+def get_dtype(dtype):
+    dtype = dtype.lower()
+    if dtype == "float32":
+        return torch.float32
+    elif dtype == "float16":
+        return torch.float16
+    elif dtype == "bfloat16":
+        return torch.bfloat16
+    else:
+        raise ValueError('Dtype not recognized')
+
+def get_lr_scheduler(args, optimizer: torch.optim.Optimizer):
+    if args.lr_scheduler == "constant":
+        return torch.optim.lr_scheduler.LambdaLR(optimizer, lambda epoch: 1)
+    elif args.lr_scheduler == "cosine":
+        def get_lr(it):
+            # 1) linear warmup for warmup_iters steps
+            if it < args.warmup_steps:
+                return it / args.warmup_steps
+            # 2) if it > lr_decay_iters, return min learning rate
+            if it > args.decay_iterations:
+                return args.min_lr_frac
+            # 3) in between, use cosine decay down to min learning rate
+            decay_ratio = (it - args.warmup_steps) / (args.decay_iterations - args.warmup_steps)
+            coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))  # coeff ranges 0..1
+            return args.min_lr_frac + coeff * (1 - args.min_lr_frac)
+        return torch.optim.lr_scheduler.LambdaLR(optimizer, get_lr)
 
 def setup_logger(log_path: str):
     loguru.logger.add(
