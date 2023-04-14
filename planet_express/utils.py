@@ -13,6 +13,10 @@ from torch.distributed import init_process_group
 from torch.utils.data import DistributedSampler
 import loguru
 
+import json
+from dataclasses import asdict, is_dataclass, fields
+
+
 
 DDPState = namedtuple("DDPState", ("is_ddp", "rank", "local_rank", "device", "is_master_process", "world_size"))
 
@@ -215,3 +219,32 @@ def unwrap_state_dict(state_dict: Dict) -> Dict:
         else:
             new_state_dict[k] = v
     return new_state_dict
+
+# Function to convert a dataclass to a dictionary
+def dataclass_to_dict(dataclass_obj):
+    if is_dataclass(dataclass_obj):
+        return {field.name: dataclass_to_dict(getattr(dataclass_obj, field.name)) for field in fields(dataclass_obj)}
+    elif isinstance(dataclass_obj, list):
+        return [dataclass_to_dict(item) for item in dataclass_obj]
+    else:
+        return dataclass_obj
+
+# Function to create a dataclass from a dictionary
+def dict_to_dataclass(dataclass_type, data):
+    if is_dataclass(dataclass_type):
+        return dataclass_type(**{field.name: dict_to_dataclass(field.type, data[field.name]) for field in fields(dataclass_type)})
+    elif isinstance(dataclass_type, list):
+        return [dict_to_dataclass(dataclass_type[0], item) for item in data]
+    else:
+        return data
+
+# Serialize dataclass to JSON
+def dataclass_to_json(dataclass_obj, file_path):
+    with open(file_path, 'w') as f:
+        json.dump(dataclass_to_dict(dataclass_obj), f)
+
+# Deserialize dataclass from JSON
+def json_to_dataclass(file_path, dataclass_type):
+    with open(file_path, 'r') as f:
+        data = json.load(f)
+    return dict_to_dataclass(dataclass_type, data)

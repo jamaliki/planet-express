@@ -5,6 +5,7 @@ from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 from planet_express.utils import setup_logger, get_ddp_state, get_dataloader_sampler, wrap_model, get_optimizer_class, \
     get_dtype, get_lr_scheduler, unwrap_state_dict
+from planet_express.summary_writer_wrapper import SummaryWriterMPWrapper, SummaryData
 
 
 class Trainer:
@@ -30,6 +31,8 @@ class Trainer:
         self.model = None
         self.train_dataset, self.train_dataloader = None, None
         self.val_dataset, self.val_dataloader = None, None
+        self.start_epoch = 0
+        self.iter = 0
 
         self.dtype = get_dtype(self.args.dtype)
         
@@ -39,11 +42,13 @@ class Trainer:
         self.logger_path = os.path.join(self.args.output_dir, "train.log")
         self.logger = setup_logger(self.logger_path)
         self.ddp_state = get_ddp_state()
+        self.summary_writer = None
         if self.ddp_state.is_master_process:
             if os.path.exists(self.logger_path):
                 os.remove(self.logger_path)
             if not os.path.exists(args.output_path):
                 os.makedirs(args.output_path)
+            self.summary_writer = SummaryWriterMPWrapper(os.path.join(args.output_path, "summary"))
         self.device = f"cuda:{self.ddp_state.local_rank if self.ddp_state.is_ddp else args.device}"
         self.model = wrap_model(self.model, self.ddp_state, self.device)
         self.optimizer = get_optimizer_class(args.optimizer)(
@@ -83,7 +88,7 @@ class Trainer:
         return torch.utils.data.default_collate(batch)
     
     def train(self):
-        for epoch in range(self.args.num_epochs):
+        for epoch in range(self.start_epoch, self.args.num_epochs):
             if self.ddp_state.is_ddp:
                 self.train_dataloader.sampler.set_epoch(epoch)
             self.model.train()
@@ -96,12 +101,19 @@ class Trainer:
                 clip_grad_norm_(self.model.parameters(), self.args.max_grad_norm)
                 self.optimizer.step()
                 self.lr_scheduler.step()
+                self.iter += 1
 
-                if self.ddp_state.is_master_process and batch_idx % self.args.log_interval == 0:
-                    self.logger.info(
-                        f"Epoch: {epoch} | Batch: {batch_idx} | Loss: {loss.item()}"
+                if self.ddp_state.is_master_process:
+                    summary_data = [SummaryData("scalar", f"Loss/{k}", v.item()) for k, v in loss_dict.items()]
+                    self.summary_writer.add(
+                        self.iter,
+                        *summary_data
                     )
-                    self.logger.info(f"Loss dict: {loss_dict}")
+                    if batch_idx % self.args.log_interval == 0:
+                        self.logger.info(
+                            f"Epoch: {epoch} | Batch: {batch_idx} | Loss: {loss.item()}"
+                        )
+                        self.logger.info(f"Loss dict: {loss_dict}")
 
             self.model.eval()
             if self.val_dataloader is not None:
@@ -119,9 +131,19 @@ class Trainer:
             model_path = os.path.join(self.args.output_dir, f"checkpoint_{epoch}.pt")
             save_dict = {
                 "epoch": epoch,
+                "iter": self.iter,
                 "model": unwrap_state_dict(self.model.state_dict()),
                 "optimizer": self.optimizer.state_dict(),
                 "lr_scheduler": self.lr_scheduler.state_dict(),
                 "train_args": self.args,
             }
             torch.save(save_dict, model_path)
+
+    def load_checkpoint(self, checkpoint_path):
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        self.model.load_state_dict(checkpoint["model"])
+        self.optimizer.load_state_dict(checkpoint["optimizer"])
+        self.lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
+        self.start_epoch = checkpoint["epoch"]
+        self.iter = checkpoint["iter"]
+        self.args = checkpoint["train_args"]
